@@ -20,7 +20,7 @@ forEachCli(() => {
       ensureProject();
     });
 
-    it('should work', async () => {
+    fit('should work', async () => {
       const myapp = uniq('myapp');
       const mylib = uniq('mylib');
       runCLI(
@@ -78,9 +78,14 @@ forEachCli(() => {
       expectTestsPass(await runCLIAsync(`test my-dir-${mylib} --no-watch`));
 
       if (supportUi()) {
-        expect(
-          runCLI(`e2e my-dir-${myapp}-e2e --headless --no-watch`)
-        ).toContain('All specs passed!');
+        try {
+          const r = runCLI(`e2e my-dir-${myapp}-e2e --headless --no-watch`);
+          console.log(r);
+          expect(r).toContain('All specs passed!');
+        } catch (e) {
+          console.log(e);
+          throw e;
+        }
       }
     }, 1000000);
 
