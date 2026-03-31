@@ -74,19 +74,13 @@
       "options": { "packageRoot": "dist/packages/{projectName}" }
     },
     "build": {
-      "dependsOn": [
-        "^build",
-        "typecheck",
-        "copy-assets",
-        "build-base",
-        "build-native"
-      ],
+      "dependsOn": ["^build", "typecheck", "build-base"],
       "inputs": ["production", "^production"],
       "cache": true
     },
     "build-native": { "inputs": ["native"], "cache": true },
     "build-base": {
-      "dependsOn": ["^build-base", "build-native"],
+      "dependsOn": ["^build-base", "build-native", "copy-assets"],
       "cache": true
     },
     "test-native": {
