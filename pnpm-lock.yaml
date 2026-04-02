@@ -3082,6 +3082,9 @@ importers:
       toml-eslint-parser:
         specifier: ^0.10.0
         version: 0.10.0
+      tree-kill:
+        specifier: ^1.2.2
+        version: 1.2.2
       tslib:
         specifier: catalog:typescript
         version: 2.8.1
@@ -3238,6 +3241,9 @@ importers:
       '@xmldom/xmldom':
         specifier: ^0.8.10
         version: 0.8.11
+      tree-kill:
+        specifier: ^1.2.2
+        version: 1.2.2
       tslib:
         specifier: catalog:typescript
         version: 2.8.1
