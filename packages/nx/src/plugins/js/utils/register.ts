@@ -50,6 +50,16 @@ const isInvokedByTsx: boolean = (() => {
 })();
 
 /**
+ * Whether the current Node.js version supports native TypeScript execution
+ * via type stripping (Node 22.6+).
+ *
+ * process.features.typescript is 'strip' | 'transform' | false in Node 22.6+
+ */
+
+const nodeSupportsNativeTypescript: boolean = !!(process as any).features
+  ?.typescript;
+
+/**
  * When process.features.typescript is truthy and the user has opted in via
  * NX_PREFER_NODE_STRIP_TYPES=true, we can skip registering swc-node or ts-node
  * transpilers since Node.js will handle TypeScript natively.
@@ -63,8 +73,7 @@ const preferNodeStripTypes: boolean = (() => {
   if (process.env.NX_PREFER_NODE_STRIP_TYPES !== 'true') {
     return false;
   }
-  // process.features.typescript is 'strip' | 'transform' | false in Node 22.6+
-  return !!(process as any).features?.typescript;
+  return nodeSupportsNativeTypescript;
 })();
 
 /**
@@ -364,7 +373,11 @@ export function registerTranspiler(
   const transpiler = getTranspiler(compilerOptions, tsConfigRaw);
 
   if (!transpiler) {
-    warnNoTranspiler();
+    // If Node.js natively supports TypeScript (22.6+), no transpiler is needed.
+    // Don't warn — Node will handle .ts files via type stripping.
+    if (!nodeSupportsNativeTypescript) {
+      warnNoTranspiler();
+    }
     return () => {};
   }
 
