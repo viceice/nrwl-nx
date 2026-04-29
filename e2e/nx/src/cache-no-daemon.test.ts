@@ -7,7 +7,8 @@ import {
   readFile,
   removeFile,
   rmDist,
-  runCLI,
+  runCLI as _runCLI,
+  RunCmdOpts,
   tmpProjPath,
   uniq,
   updateFile,
@@ -19,7 +20,12 @@ import { readdir, stat } from 'fs/promises';
 
 import { join } from 'path';
 
-describe('cache', () => {
+// Wrap runCLI so every call in this file runs with the daemon disabled,
+// without each call site having to repeat `daemon: false`.
+const runCLI = (cmd: string, opts: RunCmdOpts = {}) =>
+  _runCLI(cmd, { ...opts, daemon: false });
+
+describe('cache (no daemon)', () => {
   beforeEach(() => newProject({ packages: ['@nx/web', '@nx/js'] }));
 
   afterEach(() => cleanupProject());
@@ -114,7 +120,9 @@ describe('cache', () => {
     expect(outputWithBothLintTasksCached).toContain(
       'read the output from the cache'
     );
-    expectMatchedOutput(outputWithBothLintTasksCached, [
+    // Without the daemon, cached tasks restore from "[local cache]" rather
+    // than the daemon-on "[existing outputs match the cache]" no-op path.
+    expectCached(outputWithBothLintTasksCached, [
       myapp1,
       myapp2,
       `${myapp1}-e2e`,
@@ -188,11 +196,10 @@ describe('cache', () => {
     const runWithoutCache = runCLI(`build ${mylib}`);
     expect(runWithoutCache).not.toContain('read the output from the cache');
 
-    // Rerun without touching anything
+    // Rerun without touching anything. Without the daemon, nx restores from
+    // cache rather than taking the "existing outputs match" no-op path.
     const rerunWithUntouchedOutputs = runCLI(`build ${mylib}`);
-    expect(rerunWithUntouchedOutputs).toContain(
-      'existing outputs match the cache'
-    );
+    expect(rerunWithUntouchedOutputs).toContain('local cache');
     const outputsWithUntouchedOutputs = [
       ...listFiles('dist/apps'),
       ...listFiles('dist/.next').map((f) => `.next/${f}`),
@@ -211,9 +218,9 @@ describe('cache', () => {
     // Create a file in the dist that does not match output glob
     updateFile('dist/apps/c.ts', '');
 
-    // Rerun. Outputs were modified (extra file in dist), so the daemon's
-    // outputs-hash check fails and nx restores from cache → "[local cache]"
-    // rather than the "existing outputs match" no-op path.
+    // Rerun after extra file in dist. Without the daemon there's no
+    // outputs-hash short-circuit, so this is the same restore-from-cache
+    // path as any other rerun.
     const rerunWithNewUnrelatedFile = runCLI(`build ${mylib}`);
     expect(rerunWithNewUnrelatedFile).toContain('local cache');
     const outputsAfterAddingUntouchedFileAndRerunning = [
@@ -336,9 +343,11 @@ console.log('Build complete');
       )
     ).toBe(true);
 
-    // Second run - should hit cache and restore without EEXIST error
+    // Second run - should hit cache and restore without EEXIST error.
+    // Without the daemon, this is the regular restore path, not the
+    // "existing outputs match" no-op short-circuit.
     const secondRun = runCLI(`build ${projectName}`);
-    expect(secondRun).toContain('existing outputs match the cache');
+    expect(secondRun).toContain('local cache');
   });
 
   it('should use consider filesets when hashing', async () => {
@@ -746,17 +755,6 @@ console.log('Build complete');
     expectedCachedProjects: string[]
   ) {
     expectProjectMatchTaskCacheStatus(actualOutput, expectedCachedProjects);
-  }
-
-  function expectMatchedOutput(
-    actualOutput: string,
-    expectedMatchedOutputProjects: string[]
-  ) {
-    expectProjectMatchTaskCacheStatus(
-      actualOutput,
-      expectedMatchedOutputProjects,
-      'existing outputs match the cache'
-    );
   }
 
   function expectProjectMatchTaskCacheStatus(
