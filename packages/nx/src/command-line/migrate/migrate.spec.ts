@@ -2442,6 +2442,19 @@ describe('Migration', () => {
       );
     });
 
+    it('should reject --mode=third-party with --to @nx/workspace higher than installed', async () => {
+      mockGetInstalledNxVersion.mockReturnValue('22.0.0');
+      await expect(() =>
+        parseMigrationsOptions({
+          packageAndVersion: 'nx@22.0.0',
+          mode: 'third-party',
+          to: '@nx/workspace@23.0.0',
+        })
+      ).rejects.toThrow(
+        `Error: '--mode=third-party' cannot migrate to a version higher than what is currently installed (got '--to @nx/workspace@23.0.0', installed 'nx@22.0.0').`
+      );
+    });
+
     it('should accept --mode=third-party with --to for non-canonical packages', async () => {
       mockGetInstalledNxVersion.mockReturnValue('22.0.0');
       const r = await parseMigrationsOptions({
@@ -2864,6 +2877,66 @@ describe('Migration', () => {
 
       expect(result).toEqual({ pkg: update });
     });
+
+    it('should keep narrowing rewrites when the specifier is a tilde range covering a lower version', () => {
+      // user has `vite: ~6.2.0`, resolved 6.2.5. Cascade proposes `6.2.5` (exact).
+      // Tilde floor is 6.2.0 < resolved 6.2.5 → narrowing → keep.
+      const update = {
+        version: '6.2.5',
+        addToPackageJson: 'devDependencies' as const,
+      };
+      const result = filterDowngradedUpdates(
+        { vite: update },
+        createPackageJson({ devDependencies: { vite: '~6.2.0' } }),
+        () => '6.2.5'
+      );
+
+      expect(result).toEqual({ vite: update });
+    });
+
+    it('should drop no-op rewrites when a tilde range is already pinned to resolved', () => {
+      // user has `vite: ~6.2.5`, resolved 6.2.5. Cascade proposes `6.2.5`.
+      // Tilde floor 6.2.5 === resolved 6.2.5 → no-op → drop.
+      const result = filterDowngradedUpdates(
+        {
+          vite: { version: '6.2.5', addToPackageJson: 'devDependencies' },
+        },
+        createPackageJson({ devDependencies: { vite: '~6.2.5' } }),
+        () => '6.2.5'
+      );
+
+      expect(result).toEqual({});
+    });
+
+    it('should drop downgrades inside a tilde range', () => {
+      // user has `vite: ~6.2.0`, resolved 6.2.7. Cascade proposes `6.2.3`.
+      // Tilde floor 6.2.0 covers 6.2.3, but resolved 6.2.7 > proposed → drop.
+      const result = filterDowngradedUpdates(
+        {
+          vite: { version: '6.2.3', addToPackageJson: 'devDependencies' },
+        },
+        createPackageJson({ devDependencies: { vite: '~6.2.0' } }),
+        () => '6.2.7'
+      );
+
+      expect(result).toEqual({});
+    });
+
+    it('should drop equal-version rewrites for peer-deps-only packages (no dep/devDep specifier)', () => {
+      // `peerDependencies` is intentionally not considered — only direct
+      // dependencies / devDependencies count as a specifier. A package present
+      // only as a peer dep behaves like an unspecified package: equal-version
+      // rewrites become orphan writes and are dropped.
+      const result = filterDowngradedUpdates(
+        {
+          'peer-only': { version: '5.0.0', addToPackageJson: 'dependencies' },
+        },
+        createPackageJson({ peerDependencies: { 'peer-only': '^5.0.0' } }),
+        () => '5.0.0'
+      );
+
+      expect(result).toEqual({});
+    });
   });
 
   describe('isNpmPeerDepsError', () => {
@@ -3164,16 +3237,13 @@ describe('Migration', () => {
       expect(r).toMatchObject({ targetVersion: '22.5.3' });
     });
 
-    it('should fall back silently to the requested target when --multi-major-mode=gradual has no stepwise option', async () => {
+    it('should warn and fall back to the requested target when --multi-major-mode=gradual has no incremental option', async () => {
       setTty(true);
       // Installed at latest of its major → current-major option dropped.
       // Next-major lookup fails → next-major option dropped. Both unavailable.
       mockGetInstalledNxVersion.mockReturnValue('21.5.3');
       mockRegistry({ latest: '23.1.0', '21': '21.5.3' });
       const warnSpy = spyWarn();
-      const logSpy = jest
-        .spyOn(require('../../utils/output').output, 'log')
-        .mockImplementation(() => {});
 
       const r = await parseMigrationsOptions({
         packageAndVersion: 'latest',
@@ -3182,8 +3252,13 @@ describe('Migration', () => {
       });
 
       expect(mockPrompt).not.toHaveBeenCalled();
-      expect(warnSpy).not.toHaveBeenCalled();
-      expect(logSpy).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: expect.stringContaining(
+            'Could not look up incremental migration options for --multi-major-mode=gradual'
+          ),
+        })
+      );
       expect(r).toMatchObject({ targetVersion: '23.1.0' });
     });
 
@@ -3223,6 +3298,30 @@ describe('Migration', () => {
       });
 
       expect(r).toMatchObject({ targetVersion: '23.1.0' });
+    });
+
+    it('should bypass --multi-major-mode=gradual when --mode=third-party', async () => {
+      setTty(true);
+      // third-party anchors at the installed canonical (here 21.0.0) and
+      // must not be redirected to an incremental target. `maybePromptOrWarn…`
+      // early-returns on `mode === 'third-party'` before consulting gradual,
+      // so the flag is accepted but is a no-op.
+      mockRegistry({
+        latest: '23.1.0',
+        '21': '21.5.3',
+        '22': '22.5.3',
+      });
+      const warnSpy = spyWarn();
+
+      const r = await parseMigrationsOptions({
+        packageAndVersion: 'nx@21.0.0',
+        mode: 'third-party',
+        multiMajorMode: 'gradual',
+      });
+
+      expect(mockPrompt).not.toHaveBeenCalled();
+      expect(warnSpy).not.toHaveBeenCalled();
+      expect(r).toMatchObject({ targetVersion: '21.0.0' });
     });
 
     it('should not prompt or warn when delta is exactly 1 major', async () => {
@@ -3312,6 +3411,153 @@ describe('Migration', () => {
       expect(mockPrompt).not.toHaveBeenCalled();
       expect(warnSpy).toHaveBeenCalled();
       expect(r).toMatchObject({ targetVersion: '23.1.0' });
+    });
+
+    it('should set originalTargetVersion when gradual mode redirects to an incremental step', async () => {
+      setTty(true);
+      mockRegistry({
+        latest: '23.1.0',
+        '21': '21.5.3',
+        '22': '22.5.3',
+      });
+
+      const r = await parseMigrationsOptions({
+        packageAndVersion: 'latest',
+        mode: 'all',
+        multiMajorMode: 'gradual',
+      });
+
+      expect(r).toMatchObject({
+        targetVersion: '21.5.3',
+        originalTargetVersion: '23.1.0',
+      });
+    });
+
+    it('should set originalTargetVersion when the interactive prompt picks an incremental step', async () => {
+      setTty(true);
+      mockRegistry({
+        latest: '23.1.0',
+        '21': '21.5.3',
+        '22': '22.5.3',
+      });
+      mockPrompt.mockResolvedValue({ chosen: '22.5.3' });
+
+      const r = await parseMigrationsOptions({
+        packageAndVersion: 'latest',
+        mode: 'all',
+      });
+
+      expect(r).toMatchObject({
+        targetVersion: '22.5.3',
+        originalTargetVersion: '23.1.0',
+      });
+    });
+
+    it('should leave originalTargetVersion undefined when the interactive prompt picks the requested target', async () => {
+      setTty(true);
+      mockRegistry({
+        latest: '23.1.0',
+        '21': '21.5.3',
+        '22': '22.5.3',
+      });
+      mockPrompt.mockResolvedValue({ chosen: '23.1.0' });
+
+      const r = await parseMigrationsOptions({
+        packageAndVersion: 'latest',
+        mode: 'all',
+      });
+
+      expect(r).toMatchObject({ targetVersion: '23.1.0' });
+      expect(
+        (r as { originalTargetVersion?: string }).originalTargetVersion
+      ).toBeUndefined();
+    });
+
+    it('should leave originalTargetVersion undefined under --multi-major-mode=direct', async () => {
+      setTty(true);
+      mockRegistry({
+        latest: '23.1.0',
+        '21': '21.5.3',
+        '22': '22.5.3',
+      });
+
+      const r = await parseMigrationsOptions({
+        packageAndVersion: 'latest',
+        mode: 'all',
+        multiMajorMode: 'direct',
+      });
+
+      expect(r).toMatchObject({ targetVersion: '23.1.0' });
+      expect(
+        (r as { originalTargetVersion?: string }).originalTargetVersion
+      ).toBeUndefined();
+    });
+
+    it('should leave originalTargetVersion undefined for bare invocations within a single-major delta', async () => {
+      // Regression guard: dist-tag resolution alone (target == installed
+      // after resolving 'latest') must not be treated as a redirect, or
+      // Next Steps would suggest re-running toward the version the user
+      // already landed on.
+      setTty(true);
+      mockGetInstalledNxVersion.mockReturnValue('22.5.3');
+      mockRegistry({ latest: '22.5.3' });
+
+      const bare = await parseMigrationsOptions({ mode: 'all' });
+      expect(bare).toMatchObject({ targetVersion: '22.5.3' });
+      expect(
+        (bare as { originalTargetVersion?: string }).originalTargetVersion
+      ).toBeUndefined();
+
+      const barePkg = await parseMigrationsOptions({
+        packageAndVersion: 'nx',
+        mode: 'all',
+      });
+      expect(barePkg).toMatchObject({ targetVersion: '22.5.3' });
+      expect(
+        (barePkg as { originalTargetVersion?: string }).originalTargetVersion
+      ).toBeUndefined();
+    });
+
+    it('should propagate gradual to multiMajorMode when gradual mode redirects', async () => {
+      setTty(true);
+      mockRegistry({
+        latest: '23.1.0',
+        '21': '21.5.3',
+        '22': '22.5.3',
+      });
+
+      const r = await parseMigrationsOptions({
+        packageAndVersion: 'latest',
+        mode: 'all',
+        multiMajorMode: 'gradual',
+      });
+
+      expect(r).toMatchObject({
+        targetVersion: '21.5.3',
+        originalTargetVersion: '23.1.0',
+        multiMajorMode: 'gradual',
+      });
+    });
+
+    it('should NOT propagate gradual to multiMajorMode when the interactive prompt picks an incremental step', async () => {
+      setTty(true);
+      mockRegistry({
+        latest: '23.1.0',
+        '21': '21.5.3',
+        '22': '22.5.3',
+      });
+      mockPrompt.mockResolvedValue({ chosen: '22.5.3' });
+
+      const r = await parseMigrationsOptions({
+        packageAndVersion: 'latest',
+        mode: 'all',
+      });
+
+      expect(r).toMatchObject({
+        targetVersion: '22.5.3',
+        originalTargetVersion: '23.1.0',
+      });
+      expect((r as { multiMajorMode?: string }).multiMajorMode).toBeUndefined();
     });
   });
 });
