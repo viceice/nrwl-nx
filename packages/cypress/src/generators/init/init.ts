@@ -12,6 +12,7 @@ import {
   updateNxJson,
 } from '@nx/devkit';
 import { createNodesV2 } from '../../plugins/plugin';
+import { assertSupportedCypressVersion } from '../../utils/assert-supported-cypress-version';
 import {
   cypressVersion,
   getInstalledCypressVersion,
@@ -57,7 +58,7 @@ function updateDependencies(tree: Tree, options: Schema) {
       {},
       devDependencies,
       undefined,
-      options.keepExistingVersions
+      options.keepExistingVersions ?? true
     )
   );
 
@@ -113,6 +114,8 @@ export async function cypressInitGeneratorInternal(
   tree: Tree,
   options: Schema
 ) {
+  assertSupportedCypressVersion(tree);
+
   updateProductionFileset(tree);
 
   const nxJson = readNxJson(tree);
