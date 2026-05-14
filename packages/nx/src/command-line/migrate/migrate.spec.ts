@@ -32,6 +32,21 @@ import {
   resolveCanonicalNxPackage,
   resolveMode,
 } from './migrate';
+import {
+  readPromptFilesFromInstall,
+  validateMigrationEntries,
+  writePromptMigrationFiles,
+} from './prompt-files';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'fs';
+import { tmpdir } from 'os';
+import { dirname, join } from 'path';
 
 const createPackageJson = (
   overrides: Partial<PackageJson> = {}
@@ -3558,6 +3573,427 @@ describe('Migration', () => {
         originalTargetVersion: '23.1.0',
       });
       expect((r as { multiMajorMode?: string }).multiMajorMode).toBeUndefined();
+    });
+  });
+
+  describe('prompt-bearing migrations', () => {
+    it('should expose resolved prompt content via promptContents keyed by package and prompt path', async () => {
+      const migrator = new Migrator({
+        packageJson: createPackageJson({
+          dependencies: { '@nx/expo': '1.0.0' },
+        }),
+        getInstalledPackageVersion: () => '1.0.0',
+        fetch: () =>
+          Promise.resolve({
+            version: '2.0.0',
+            generators: {
+              'ai-instructions': {
+                version: '2.0.0',
+                description: 'AI prompt only',
+                prompt: './files/ai-instructions.md',
+              },
+            },
+            resolvedPromptFiles: {
+              './files/ai-instructions.md': 'PROMPT BODY',
+            },
+          } as ResolvedMigrationConfiguration),
+        from: {},
+        to: {},
+      });
+
+      const result = await migrator.migrate('@nx/expo', '2.0.0');
+      expect(result.migrations).toEqual([
+        {
+          version: '2.0.0',
+          name: 'ai-instructions',
+          package: '@nx/expo',
+          description: 'AI prompt only',
+          prompt: './files/ai-instructions.md',
+        },
+      ]);
+      expect(result.promptContents).toEqual({
+        '@nx/expo::./files/ai-instructions.md': 'PROMPT BODY',
+      });
+    });
+
+    it('should preserve both prompt and implementation on hybrid entries', async () => {
+      const migrator = new Migrator({
+        packageJson: createPackageJson({ dependencies: { pkg: '1.0.0' } }),
+        getInstalledPackageVersion: () => '1.0.0',
+        fetch: () =>
+          Promise.resolve({
+            version: '2.0.0',
+            generators: {
+              hybrid: {
+                version: '2.0.0',
+                description: 'hybrid',
+                implementation: './migrations/hybrid',
+                prompt: './files/hybrid.md',
+              },
+            },
+            resolvedPromptFiles: {
+              './files/hybrid.md': 'HYBRID',
+            },
+          } as ResolvedMigrationConfiguration),
+        from: {},
+        to: {},
+      });
+
+      const result = await migrator.migrate('pkg', '2.0.0');
+      expect(result.migrations[0]).toMatchObject({
+        implementation: './migrations/hybrid',
+        prompt: './files/hybrid.md',
+      });
+      expect(result.promptContents).toEqual({
+        'pkg::./files/hybrid.md': 'HYBRID',
+      });
+    });
+
+    it('should omit promptContents from the result when no prompts were resolved', async () => {
+      const migrator = new Migrator({
+        packageJson: createPackageJson({ dependencies: { pkg: '1.0.0' } }),
+        getInstalledPackageVersion: () => '1.0.0',
+        fetch: () =>
+          Promise.resolve({
+            version: '2.0.0',
+            generators: {
+              one: {
+                version: '2.0.0',
+                description: 'plain',
+                implementation: './migrations/one',
+              },
+            },
+          } as ResolvedMigrationConfiguration),
+        from: {},
+        to: {},
+      });
+
+      const result = await migrator.migrate('pkg', '2.0.0');
+      expect(result).not.toHaveProperty('promptContents');
+    });
+  });
+
+  describe('validateMigrationEntries', () => {
+    it('should not throw when all entries have at least one of implementation/factory/prompt', () => {
+      expect(() =>
+        validateMigrationEntries('@nx/x', '2.0.0', {
+          generators: {
+            a: { version: '2.0.0', implementation: './a' },
+            b: { version: '2.0.0', factory: './b' },
+            c: { version: '2.0.0', prompt: './c.md' },
+          },
+        })
+      ).not.toThrow();
+    });
+
+    it('should throw when an entry has none of implementation/factory/prompt', () => {
+      expect(() =>
+        validateMigrationEntries('@nx/x', '2.0.0', {
+          generators: {
+            broken: { version: '2.0.0', description: 'oops' },
+          },
+        })
+      ).toThrow(
+        /Invalid migration "broken" in package "@nx\/x@2\.0\.0": migration entries must have at least one of "implementation", "factory", or "prompt"\./
+      );
+    });
+
+    it('should validate entries from both generators and schematics', () => {
+      expect(() =>
+        validateMigrationEntries('pkg', '1.0.0', {
+          schematics: {
+            broken: { version: '1.0.0' },
+          },
+        })
+      ).toThrow(/Invalid migration "broken" in package "pkg@1\.0\.0"/);
+    });
+  });
+
+  describe('prompt path traversal', () => {
+    it.each([
+      ['../../etc/passwd'],
+      ['./safe/../../escape.md'],
+      ['/etc/passwd'],
+    ])(
+      'should reject prompt path %p that escapes the migrations directory',
+      async (badPath) => {
+        await expect(
+          readPromptFilesFromInstall(
+            'pkg',
+            '1.0.0',
+            {
+              generators: {
+                m: { version: '1.0.0', prompt: badPath },
+              },
+            },
+            '/tmp/fake-pkg/migrations.json'
+          )
+        ).rejects.toThrow(/Invalid prompt path/);
+      }
+    );
+  });
+
+  describe('writePromptMigrationFiles', () => {
+    let tmpRoot: string;
+
+    beforeEach(() => {
+      tmpRoot = mkdtempSync(join(tmpdir(), 'nx-prompt-migrations-'));
+    });
+
+    afterEach(() => {
+      rmSync(tmpRoot, { recursive: true, force: true });
+    });
+
+    it('should write prompt files under the package and target version directories using the basename', () => {
+      const migrations = [
+        {
+          package: '@nx/expo',
+          name: 'm',
+          version: '22.2.0-beta.3',
+          prompt:
+            './src/migrations/update-22-2-0/files/ai-instructions-for-expo-54.md',
+        },
+      ];
+      const promptContents = {
+        '@nx/expo::./src/migrations/update-22-2-0/files/ai-instructions-for-expo-54.md':
+          'EXPO',
+      };
+
+      const written = writePromptMigrationFiles(
+        tmpRoot,
+        migrations,
+        promptContents,
+        '22.5.0'
+      );
+
+      const expectedPath =
+        'tools/ai-migrations/@nx/expo/22.5.0/ai-instructions-for-expo-54.md';
+      expect(written).toEqual([expectedPath]);
+      expect(migrations[0].prompt).toBe(expectedPath);
+      expect(readFileSync(join(tmpRoot, expectedPath), 'utf-8')).toBe('EXPO');
+    });
+
+    it('should write under the package directory when unscoped', () => {
+      const migrations = [
+        {
+          package: 'mypackage',
+          name: 'm',
+          version: '1.0.0',
+          prompt: './files/foo.md',
+        },
+      ];
+      const promptContents = { 'mypackage::./files/foo.md': 'X' };
+
+      const written = writePromptMigrationFiles(
+        tmpRoot,
+        migrations,
+        promptContents,
+        '1.0.0'
+      );
+
+      expect(written).toEqual(['tools/ai-migrations/mypackage/1.0.0/foo.md']);
+    });
+
+    it('should write a single file when two entries reference the same source .md', () => {
+      const migrations = [
+        {
+          package: '@nx/vitest',
+          name: 'a',
+          version: '22.1.0-beta.8',
+          prompt: './files/ai-instructions-for-vitest-4.md',
+        },
+        {
+          package: '@nx/vitest',
+          name: 'b',
+          version: '22.3.2-beta.0',
+          prompt: './files/ai-instructions-for-vitest-4.md',
+        },
+      ];
+      const promptContents = {
+        '@nx/vitest::./files/ai-instructions-for-vitest-4.md': 'V',
+      };
+
+      const written = writePromptMigrationFiles(
+        tmpRoot,
+        migrations,
+        promptContents,
+        '22.4.0'
+      );
+
+      const expectedPath =
+        'tools/ai-migrations/@nx/vitest/22.4.0/ai-instructions-for-vitest-4.md';
+      expect(written).toEqual([expectedPath]);
+      expect(migrations[0].prompt).toBe(expectedPath);
+      expect(migrations[1].prompt).toBe(expectedPath);
+      expect(readFileSync(join(tmpRoot, expectedPath), 'utf-8')).toBe('V');
+    });
+
+    it('should suffix the basename when two entries have different content but the same basename', () => {
+      const migrations = [
+        {
+          package: 'pkg',
+          name: 'a',
+          version: '1.0.0',
+          prompt: './a/foo.md',
+        },
+        {
+          package: 'pkg',
+          name: 'b',
+          version: '1.0.0',
+          prompt: './b/foo.md',
+        },
+      ];
+      const promptContents = {
+        'pkg::./a/foo.md': 'A',
+        'pkg::./b/foo.md': 'B',
+      };
+
+      const written = writePromptMigrationFiles(
+        tmpRoot,
+        migrations,
+        promptContents,
+        '2.0.0'
+      );
+
+      expect(written).toEqual([
+        'tools/ai-migrations/pkg/2.0.0/foo.md',
+        'tools/ai-migrations/pkg/2.0.0/foo-1.md',
+      ]);
+      expect(migrations[0].prompt).toBe('tools/ai-migrations/pkg/2.0.0/foo.md');
+      expect(migrations[1].prompt).toBe(
+        'tools/ai-migrations/pkg/2.0.0/foo-1.md'
+      );
+      expect(
+        readFileSync(
+          join(tmpRoot, 'tools/ai-migrations/pkg/2.0.0/foo.md'),
+          'utf-8'
+        )
+      ).toBe('A');
+      expect(
+        readFileSync(
+          join(tmpRoot, 'tools/ai-migrations/pkg/2.0.0/foo-1.md'),
+          'utf-8'
+        )
+      ).toBe('B');
+    });
+
+    it('should reuse an existing on-disk file when its content is identical', () => {
+      const existing = join(tmpRoot, 'tools/ai-migrations/pkg/2.0.0/foo.md');
+      mkdirSync(dirname(existing), { recursive: true });
+      writeFileSync(existing, 'SAME');
+
+      const migrations = [
+        {
+          package: 'pkg',
+          name: 'm',
+          version: '1.0.0',
+          prompt: './files/foo.md',
+        },
+      ];
+      const promptContents = { 'pkg::./files/foo.md': 'SAME' };
+
+      const written = writePromptMigrationFiles(
+        tmpRoot,
+        migrations,
+        promptContents,
+        '2.0.0'
+      );
+
+      expect(written).toEqual([]);
+      expect(migrations[0].prompt).toBe('tools/ai-migrations/pkg/2.0.0/foo.md');
+      expect(readFileSync(existing, 'utf-8')).toBe('SAME');
+    });
+
+    it('should suffix when an existing on-disk file has different content', () => {
+      const existing = join(tmpRoot, 'tools/ai-migrations/pkg/2.0.0/foo.md');
+      mkdirSync(dirname(existing), { recursive: true });
+      writeFileSync(existing, 'OLD');
+
+      const migrations = [
+        {
+          package: 'pkg',
+          name: 'm',
+          version: '1.0.0',
+          prompt: './files/foo.md',
+        },
+      ];
+      const promptContents = { 'pkg::./files/foo.md': 'NEW' };
+
+      const written = writePromptMigrationFiles(
+        tmpRoot,
+        migrations,
+        promptContents,
+        '2.0.0'
+      );
+
+      expect(written).toEqual(['tools/ai-migrations/pkg/2.0.0/foo-1.md']);
+      expect(migrations[0].prompt).toBe(
+        'tools/ai-migrations/pkg/2.0.0/foo-1.md'
+      );
+      expect(readFileSync(existing, 'utf-8')).toBe('OLD');
+      expect(
+        readFileSync(
+          join(tmpRoot, 'tools/ai-migrations/pkg/2.0.0/foo-1.md'),
+          'utf-8'
+        )
+      ).toBe('NEW');
+    });
+
+    it('should walk past existing suffixed files until it finds a free or content-matching slot', () => {
+      const dir = join(tmpRoot, 'tools/ai-migrations/pkg/2.0.0');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'foo.md'), 'A');
+      writeFileSync(join(dir, 'foo-1.md'), 'B');
+
+      const migrations = [
+        {
+          package: 'pkg',
+          name: 'm',
+          version: '1.0.0',
+          prompt: './files/foo.md',
+        },
+      ];
+      const promptContents = { 'pkg::./files/foo.md': 'C' };
+
+      const written = writePromptMigrationFiles(
+        tmpRoot,
+        migrations,
+        promptContents,
+        '2.0.0'
+      );
+
+      expect(written).toEqual(['tools/ai-migrations/pkg/2.0.0/foo-2.md']);
+      expect(migrations[0].prompt).toBe(
+        'tools/ai-migrations/pkg/2.0.0/foo-2.md'
+      );
+      expect(readFileSync(join(dir, 'foo-2.md'), 'utf-8')).toBe('C');
+    });
+
+    it('should ignore entries whose prompt content is missing from the map', () => {
+      const migrations = [
+        { package: 'pkg', name: 'a', version: '1.0.0' },
+        {
+          package: 'pkg',
+          name: 'b',
+          version: '1.0.0',
+          prompt: './missing.md',
+        },
+        {
+          package: 'pkg',
+          name: 'c',
+          version: '1.0.0',
+          prompt: './x.md',
+        },
+      ];
+      const promptContents = { 'pkg::./x.md': 'X' };
+
+      const written = writePromptMigrationFiles(
+        tmpRoot,
+        migrations,
+        promptContents,
+        '1.0.0'
+      );
+      expect(written).toEqual(['tools/ai-migrations/pkg/1.0.0/x.md']);
     });
   });
 });
