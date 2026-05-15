@@ -12,6 +12,7 @@ import {
   updateNxJson,
   updateProjectConfiguration,
 } from '@nx/devkit';
+import { upsertTargetDefault } from '@nx/devkit/internal';
 import type * as ts from 'typescript';
 
 import { ensureTypescript } from '@nx/js/src/utils/typescript/ensure-typescript';
@@ -229,9 +230,6 @@ export async function setupSsrGenerator(tree: Tree, options: Schema) {
       'server',
     ];
   }
-  nxJson.targetDefaults ??= {};
-  nxJson.targetDefaults['server'] ??= {};
-  nxJson.targetDefaults.server.cache = true;
 
   generateFiles(tree, join(__dirname, 'files'), projectRoot, {
     tmpl: '',
@@ -260,6 +258,7 @@ export async function setupSsrGenerator(tree: Tree, options: Schema) {
     tree.write(serverEntry, changes);
   }
 
+  upsertTargetDefault(tree, nxJson, { target: 'server', cache: true });
   updateNxJson(tree, nxJson);
 
   const installTask = addDependenciesToPackageJson(
