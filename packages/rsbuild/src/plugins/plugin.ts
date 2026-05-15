@@ -15,14 +15,15 @@ import {
 } from '@nx/devkit';
 import { hashObject } from 'nx/src/hasher/file-hasher';
 import { workspaceDataDirectory } from 'nx/src/utils/cache-directory';
-import { isUsingTsSolutionSetup as _isUsingTsSolutionSetup } from '@nx/js/src/utils/typescript/ts-solution-setup';
+import {
+  isUsingTsSolutionSetup as _isUsingTsSolutionSetup,
+  addBuildAndWatchDepsTargets,
+} from '@nx/js/internal';
 import { getLockFileName } from '@nx/js';
 import { readdirSync } from 'fs';
 import { join, dirname, isAbsolute, relative } from 'path';
 import { minimatch } from 'minimatch';
 import type { RsbuildConfig } from '@rsbuild/core';
-import { addBuildAndWatchDepsTargets } from '@nx/js/src/plugins/typescript/util';
-
 export interface RsbuildPluginOptions {
   buildTargetName?: string;
   devTargetName?: string;

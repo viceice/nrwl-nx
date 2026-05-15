@@ -27,13 +27,13 @@ import {
   writeJson,
 } from '@nx/devkit';
 import { getRelativePathToRootTsConfig } from '@nx/js';
-import { normalizeLinterOption } from '@nx/js/src/utils/generator-prompts';
 import {
+  normalizeLinterOption,
   getProjectPackageManagerWorkspaceState,
   getProjectPackageManagerWorkspaceStateWarningTask,
-} from '@nx/js/src/utils/package-manager-workspaces';
-import { ensureTypescript } from '@nx/js/src/utils/typescript/ensure-typescript';
-import { isUsingTsSolutionSetup } from '@nx/js/src/utils/typescript/ts-solution-setup';
+  ensureTypescript,
+  isUsingTsSolutionSetup,
+} from '@nx/js/internal';
 import { warnPlaywrightExecutorGenerating } from '../../utils/deprecation';
 import { execSync } from 'child_process';
 import { PackageJson } from 'nx/src/utils/package-json';
